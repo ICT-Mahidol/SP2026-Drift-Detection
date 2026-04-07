@@ -24,6 +24,6 @@ class Configuration:
                 Parameter("threshold", values=[0.7, 0.8]),
             ],
             seeds=None,
-            n_runs=5,
+            n_runs=1,
         ),
     ]
