@@ -29,11 +29,11 @@ class ModelOptimizer:
         self.classifiers = None
         self.n_runs = n_runs
 
-    def _model_generator(self):
+    def _detector_generator(self):
         """
-        A generator that yields initialized models using configurations provided by the ConfigGenerator.
+        A generator that yields initialized detectors using configurations provided by the ConfigGenerator.
 
-        :return: the initialized models
+        :return: the initialized detectors
         """
         for config in self.configs:
             yield self.base_model(**config), config
@@ -54,27 +54,27 @@ class ModelOptimizer:
                 experiment_name=experiment_name,
                 config_keys=self.configs.get_parameter_names(),
             )
-            for model, config in self._model_generator():
+            for detector, config in self._detector_generator():
                 if verbose:
                     print(f"{logger.model}: {config}")
 
-                if isinstance(model, HybridDriftDetector):
+                if isinstance(detector, HybridDriftDetector):
                     drifts, labels, predictions = self._run_hybrid(
-                        model, stream, n_training_samples
+                        detector, stream, n_training_samples
                     )
                 else:
                     drifts, labels, predictions = self._run_unsupervised(
-                        model, stream, n_training_samples
+                        detector, stream, n_training_samples
                     )
 
                 metrics = get_metrics(stream, drifts, labels, predictions)
                 logger.log(config, metrics, drifts)
 
-    def _run_unsupervised(self, model, stream, n_training_samples):
+    def _run_unsupervised(self, detector, stream, n_training_samples):
         """
         Run the original unsupervised drift detection loop (D3-compatible).
 
-        :param model: the unsupervised drift detector
+        :param detector: the unsupervised drift detector
         :param stream: the data stream
         :param n_training_samples: the number of training samples
         :return: tuple of (drifts, labels, predictions)
@@ -89,7 +89,7 @@ class ModelOptimizer:
             if i != 0:
                 predictions.append(self.classifiers.predict(x))
                 labels.append(y)
-            if model.update(x):
+            if detector.update(x):
                 drifts.append(i)
                 self.classifiers.reset()
                 train_steps = 0
@@ -98,13 +98,13 @@ class ModelOptimizer:
 
         return drifts, labels, predictions
 
-    def _run_hybrid(self, model, stream, n_training_samples):
+    def _run_hybrid(self, detector, stream, n_training_samples):
         """
         Run the hybrid drift detection loop (D3-SHAP compatible).
         Uses window-based data collection with warm-up phases.
 
         During warm-up:
-          - Collects (x, y) into the detector's buffer
+          - Collects (x, y) into the warmup buffer
           - No predictions are made
           - No classifier training occurs
           - No drift detection occurs
@@ -116,7 +116,7 @@ class ModelOptimizer:
           - Trains classifier incrementally
           - Checks for drift using augmented features
 
-        :param model: the hybrid drift detector
+        :param detector: the hybrid drift detector
         :param stream: the data stream
         :param n_training_samples: the number of training samples
         :return: tuple of (drifts, labels, predictions)
@@ -133,12 +133,12 @@ class ModelOptimizer:
             if is_warming_up:
                 warmup_buffer.append((x, y))
 
-                if len(warmup_buffer) >= model.n_reference_samples:
+                if len(warmup_buffer) >= detector.n_reference_samples:
                     self.classifiers.batch_fit(
                         warmup_buffer,
                         nonadaptive=i < n_training_samples,
                     )
-                    model.build_reference(warmup_buffer, self.classifiers)
+                    detector.build_reference(warmup_buffer, self.classifiers)
                     train_steps = len(warmup_buffer)
                     warmup_buffer = []
                     is_warming_up = False
@@ -148,7 +148,7 @@ class ModelOptimizer:
                 predictions.append(self.classifiers.predict(x))
                 labels.append(y)
 
-            if model.update(x, y, self.classifiers):
+            if detector.update(x, y, self.classifiers):
                 drifts.append(i)
                 self.classifiers.reset()
                 train_steps = 0
