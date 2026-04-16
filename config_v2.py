@@ -1,7 +1,5 @@
 from datasets import (
-    InsectsAbruptBalanced,
-    InsectsGradualBalanced,
-    InsectsIncrementalBalanced,
+    IncrementalDrift,
 )
 from detectors import *
 from optimization.model_optimizer import ModelOptimizer
@@ -10,9 +8,7 @@ from optimization.parameter import Parameter
 
 class Configuration:
     streams = [
-        InsectsAbruptBalanced(),
-        #InsectsGradualBalanced(),
-        #InsectsIncrementalBalanced(),
+        IncrementalDrift(),
     ]
     n_training_samples = 1000
     models = [

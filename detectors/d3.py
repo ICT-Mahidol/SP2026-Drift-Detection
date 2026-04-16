@@ -73,7 +73,7 @@ class DiscriminativeDriftDetector2019(UnsupervisedDriftDetector):
         labels = self._get_labels()
         discriminator = LogisticRegression(solver="liblinear", random_state=self.seed)
         predictions = self._predict(discriminator, np.array(self.data), labels)
-        auc_score = roc_auc_score(labels, predictions)
+        auc_score = roc_auc_score(labels, predictions) #todo : change to permutation test
         return auc_score >= self.threshold
 
     def _get_labels(self) -> np.array:
