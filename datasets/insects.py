@@ -12,10 +12,10 @@ class Insects(base.FileDataset):
 
     def __iter__(self):
         converters = {f"Att{i}": float for i in range(1, 34)}
-        converters["class"] = str
+        converters["Class"] = str
         return stream.iter_csv(
             self.full_path,
-            target="class",
+            target="Class",
             converters=converters,
         )
 
