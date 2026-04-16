@@ -1,5 +1,7 @@
 from typing import List, Optional
 
+from tqdm import tqdm
+
 from detectors.base import HybridDriftDetector, UnsupervisedDriftDetector
 from metrics.metrics import get_metrics
 from .classifiers import Classifiers
@@ -129,7 +131,7 @@ class ModelOptimizer:
         is_warming_up = True
         warmup_buffer = []
 
-        for i, (x, y) in enumerate(stream):
+        for i, (x, y) in enumerate(tqdm(stream, total=getattr(stream, "n_samples", None))):
             if is_warming_up:
                 warmup_buffer.append((x, y))
 
@@ -148,7 +150,7 @@ class ModelOptimizer:
                 predictions.append(self.classifiers.predict(x))
                 labels.append(y)
 
-            if detector.update(x, y, self.classifiers):
+            if detector.update(x, self.classifiers):
                 drifts.append(i)
                 self.classifiers.reset()
                 train_steps = 0

@@ -51,7 +51,6 @@ class HybridDriftDetector(ABC):
     def update(
         self,
         features: dict,
-        y,
         classifier,
     ) -> bool:
         raise NotImplementedError("This abstract base class does not implement update.")

@@ -26,4 +26,27 @@ class Configuration:
             seeds=None,
             n_runs=1,
         ),
+        ModelOptimizer(
+            base_model=DiscriminativeDriftDetector2019SHAP,
+            parameters=[
+                Parameter("n_reference_samples", values=[250, 500]),
+                Parameter("recent_samples_proportion", values=[1.0]),
+                Parameter("threshold", values=[0.7, 0.8]),
+                Parameter("shap_mode", values=["first", "all"]),
+                Parameter("shap_classifier", values=["lightgbm"]),
+            ],
+            seeds=None,
+            n_runs=1,
+        ),
+        ModelOptimizer(
+            base_model=DiscriminativeDriftDetector2019SHAPMeanAbs,
+            parameters=[
+                Parameter("n_reference_samples", values=[250, 500]),
+                Parameter("recent_samples_proportion", values=[1.0]),
+                Parameter("threshold", values=[0.7, 0.8]),
+                Parameter("shap_classifier", values=["lightgbm"]),
+            ],
+            seeds=None,
+            n_runs=1,
+        ),
     ]

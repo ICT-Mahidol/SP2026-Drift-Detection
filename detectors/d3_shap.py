@@ -5,14 +5,19 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 
-from .base import UnsupervisedDriftDetector
+from .base import HybridDriftDetector
 from optimization.classifiers import Classifiers
 
 
-class DiscriminativeDriftDetector2019SHAP(UnsupervisedDriftDetector):
+class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
     """
     Discriminative Drift Detector (D3) with SHAP-based feature importance.
-    Modification of DiscriminativeDriftDetector2019 that also collects labels alongside features.
+    Extends HybridDriftDetector; warm-up and classifier management are handled
+    externally by the ModelOptimizer.
+
+    SHAP computation mode is controlled by ``shap_mode``:
+    - ``"first"`` (default): use SHAP values for the first class only.
+    - ``"all"``: concatenate SHAP values for all classes.
     """
 
     def __init__(
@@ -20,41 +25,64 @@ class DiscriminativeDriftDetector2019SHAP(UnsupervisedDriftDetector):
         n_reference_samples: int = 100,
         recent_samples_proportion: float = 0.1,
         threshold: float = 0.7,
+        shap_mode: str = "first",
+        shap_classifier: str = "lightgbm",
         seed: Optional[int] = None,
     ):
         super().__init__(seed)
         self.data = []
-        self.labels = []
+        self.feature_names = None
+        self._reference_labels = None
+        self._shap_model = None
+        self._explainer = None
         self.n_reference_samples = n_reference_samples
         self.recent_samples_proportion = recent_samples_proportion
         self.n_samples = int(n_reference_samples * (1 + recent_samples_proportion))
         self.threshold = threshold
+        self.shap_mode = shap_mode
+        self.shap_classifier = shap_classifier
         self.kfold = StratifiedKFold(n_splits=2, shuffle=True, random_state=self.seed)
-        self.shap_values = None
 
-    def update(self, features: dict, label, classifiers: Classifiers) -> bool:
+    def build_reference(self, buffer: list, classifiers: Classifiers) -> None:
+        """
+        Initialise the reference window from the warm-up buffer provided by the ModelOptimizer.
+        Expects ``buffer`` to be a list of (features_dict, label) pairs.
+
+        :param buffer: the warm-up buffer collected by the runner
+        :param classifiers: the Classifiers instance (unused here, kept for interface compatibility)
+        """
+        xs = [
+            np.fromiter(x.values(), dtype=float)
+            for x, _ in buffer[-self.n_reference_samples :]
+        ]
+        self.data = xs
+        if buffer:
+            self.feature_names = list(buffer[0][0].keys())
+            self._reference_labels = [y for _, y in buffer[-self.n_reference_samples :]]
+        self._shap_model = self._train_shap_model(np.array(xs), self._reference_labels)
+        import shap
+        self._explainer = shap.TreeExplainer(self._shap_model, np.array(xs))
+
+    def update(self, features: dict, classifiers: Classifiers) -> bool:
         """
         Update the detector with the most recent observation and detect if a drift occurred.
 
         :param features: the features
-        :param label: the true class label of the observation
         :param classifiers: the Classifiers instance for use in future steps
         :returns: True if a drift occurred else False
         """
         features = np.fromiter(features.values(), dtype=float)
         if len(self.data) != self.n_samples:
             self.data.append(features)
-            self.labels.append(label)
+            return False
         else:
             if self._detect_drift(classifiers):
                 self.data = self.data[self.n_reference_samples:]
-                self.labels = self.labels[self.n_reference_samples:]
                 return True
             else:
                 step = int(np.ceil(self.n_reference_samples * self.recent_samples_proportion))
                 self.data = self.data[step:]
-                self.labels = self.labels[step:]
-        return False
+                return False
 
     def _detect_drift(self, classifiers: Classifiers) -> bool:
         """
@@ -83,33 +111,69 @@ class DiscriminativeDriftDetector2019SHAP(UnsupervisedDriftDetector):
         disc_labels[self.n_reference_samples:] = 1
         return disc_labels
 
+    def _train_shap_model(self, X: np.ndarray, y: list):
+        """
+        Train a surrogate sklearn-compatible model on the reference window for use with
+        TreeExplainer.
+
+        :param X: reference feature array, shape (n_reference_samples, n_features)
+        :param y: reference class labels
+        :return: trained LGBMClassifier or XGBClassifier
+        """
+        if self.shap_classifier == "xgboost":
+            from xgboost import XGBClassifier
+            model = XGBClassifier(
+                n_estimators=5,
+                random_state=self.seed,
+                eval_metric="mlogloss",
+                verbosity=0,
+            )
+            model.fit(X, y)
+            return model
+        # default: lightgbm
+        from lightgbm import LGBMClassifier
+        model = LGBMClassifier(n_estimators=5, random_state=self.seed, verbosity=-1)
+        model.fit(X, y)
+        return model
+
+    def _get_raw_shap(self, classifiers: Classifiers):
+        """
+        Compute raw SHAP values using the cached shap.TreeExplainer (built once per
+        reference window in ``build_reference``).
+
+        Always returns a list of arrays ``[(n_samples, n_features)] * n_classes`` so that
+        downstream reduction methods are consistent across backends.
+
+        :param classifiers: the Classifiers instance (unused; SHAP uses the surrogate model)
+        :return: list of arrays, one per class, each of shape (n_samples, n_features)
+        """
+        all_data = np.array(self.data)
+        raw = self._explainer.shap_values(all_data, check_additivity=False)
+        # Normalise to list-of-arrays regardless of SHAP version
+        if isinstance(raw, list):
+            return raw
+        if raw.ndim == 3:
+            return [raw[:, :, i] for i in range(raw.shape[2])]
+        # binary 2D fallback — wrap so downstream code stays uniform
+        return [raw, -raw]
+
     def _compute_shap_values(self, classifiers: Classifiers) -> np.ndarray:
         """
-        Returns raw SHAP values for the entire data window (reference + recent) as a single 2D array.
-        Uses the reference window as background and explains all samples.
-        Uses the first class only.
+        Returns reduced SHAP values for the entire data window (reference + recent).
+
+        The shape of the returned array depends on ``self.shap_mode``:
+        - ``"first"``: (n_samples, n_features)  — first class only
+        - ``"all\"``:   (n_samples, n_features * n_classes)  — all classes concatenated
 
         :param classifiers: the Classifiers instance
-        :return: array of shape (n_samples, n_features) containing raw SHAP values
+        :return: 2D array of shape (n_samples, n_features[*n_classes])
         """
-        import shap
+        shap_values = self._get_raw_shap(classifiers)  # list[(n_samples, n_features)] * n_classes
 
-        model = classifiers.assisted_hoeffding_tree
-        background = np.array(self.data[: self.n_reference_samples])
-        all_data = np.array(self.data)
-        explainer = shap.TreeExplainer(model, background)
-        shap_values = explainer.shap_values(all_data)
-
-        # list of arrays: [(n_samples, n_features)] * n_classes  — older SHAP
-        if isinstance(shap_values, list):
+        if self.shap_mode == "all":
+            return np.hstack(shap_values)
+        else:  # "first"
             return shap_values[0]
-
-        # 3D array: (n_samples, n_features, n_classes)  — newer SHAP
-        if shap_values.ndim == 3:
-            return shap_values[:, :, 0]
-
-        # 2D array: (n_samples, n_features)  — binary fallback
-        return shap_values
 
     def _augment_data_with_shap(self, raw_shap: np.ndarray) -> np.ndarray:
         """
@@ -138,33 +202,3 @@ class DiscriminativeDriftDetector2019SHAP(UnsupervisedDriftDetector):
             predictions[test_index] = discriminator.predict_proba(data[test_index])[:, 1]
         return predictions
 
-    '''
-        Alternative: _compute_shap_values that returns SHAP values for all classes
-        instead of only the first class.
-        It can be used directly with the existing _augment_data_with_shap.
-        The result is that augmented_data will have shape
-        (n_samples, n_features + n_features * n_classes)
-    '''
-
-    '''
-    def _compute_shap_values_all_classes(self, classifiers: Classifiers) -> np.ndarray:
-        import shap
-    
-        model = classifiers.assisted_hoeffding_tree
-        background = np.array(self.data[: self.n_reference_samples])
-        all_data = np.array(self.data)
-        explainer = shap.TreeExplainer(model, background)
-        shap_values = explainer.shap_values(all_data)
-    
-        # list of arrays: [(n_samples, n_features)] * n_classes  — older SHAP
-        if isinstance(shap_values, list):
-            return np.hstack(shap_values)
-    
-        # 3D array: (n_samples, n_features, n_classes)  — newer SHAP
-        if shap_values.ndim == 3:
-            n_samples, n_features, n_classes = shap_values.shape
-            return shap_values.reshape(n_samples, n_features * n_classes)
-    
-        # 2D array: (n_samples, n_features)  — binary fallback
-        return shap_values
-    '''
