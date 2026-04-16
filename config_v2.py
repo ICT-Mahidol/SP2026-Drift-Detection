@@ -4,7 +4,7 @@ from datasets import (
     InsectsIncrementalBalanced,
 )
 from detectors import *
-from optimization.model_optimizer import ModelOptimizer
+from optimization.model_optimizer_v2 import ModelOptimizer
 from optimization.parameter import Parameter
 
 
@@ -15,7 +15,7 @@ class Configuration:
         #InsectsIncrementalBalanced(),
     ]
     n_training_samples = 1000
-    models = [
+    detectors = [
         ModelOptimizer(
             base_model=DiscriminativeDriftDetector2019,
             parameters=[

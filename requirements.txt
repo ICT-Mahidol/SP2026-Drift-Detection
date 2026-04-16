@@ -4,4 +4,5 @@ pandas==1.4.3
 river==0.11.1
 scipy==1.8.1
 scikit-learn==1.1.1
+shap>=0.41.0
 ydata-profiling==4.1.0
