@@ -4,7 +4,7 @@ from river.datasets import base
 from river import stream
 
 
-class IncrementalDrift(base.FileDataset):
+class IncrementalDrift(base.FileDataset): #TODO : Test class
     def __init__(
         self,
         directory_path: str = "datasets/files",
@@ -17,7 +17,7 @@ class IncrementalDrift(base.FileDataset):
         )
         self.full_path = path.join(directory_path, self.filename)
 
-    def __iter__(self):
+    def __iter__(self): #TODO : call sample -> window
         for x, y in stream.iter_csv(
             self.full_path,
             target="label",
