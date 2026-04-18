@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from detectors.base import HybridDriftDetector, UnsupervisedDriftDetector
 from metrics.metrics import get_metrics
-from .classifiers import Classifiers
+from .classifiers_v2 import ClassifiersV2
 from .config_generator import ConfigGenerator
 from .logger import ExperimentLogger
 from .parameter import Parameter
@@ -81,7 +81,7 @@ class ModelOptimizer:
         :param n_training_samples: the number of training samples
         :return: tuple of (drifts, labels, predictions)
         """
-        self.classifiers = Classifiers()
+        self.classifiers = ClassifiersV2()
         drifts = []
         labels = []
         predictions = []
@@ -95,14 +95,14 @@ class ModelOptimizer:
                 drifts.append(i)
                 self.classifiers.reset()
                 train_steps = 0
-            self.classifiers.fit(x, y, nonadaptive=i < n_training_samples)
+            self.classifiers.fit([x], [y], nonadaptive=i < n_training_samples)
             train_steps += 1
 
         return drifts, labels, predictions
 
     def _run_hybrid(self, detector, stream, n_training_samples):
         """
-        Run the hybrid drift detection loop (D3-SHAP compatible).
+        Run the hybrid drift detection loop (D3-SHAP / ClassifiersV2 compatible).
         Uses window-based data collection with warm-up phases.
 
         During warm-up:
@@ -111,19 +111,20 @@ class ModelOptimizer:
           - No classifier training occurs
           - No drift detection occurs
         When buffer is full:
-          - Batch trains the classifier from buffer
-          - Builds SHAP-augmented reference window
+          - Batch-trains ClassifiersV2 from the entire buffer (no online learning)
+          - Builds SHAP-augmented reference window using the pre-fitted model
         During detection:
-          - Predicts and collects labels normally
-          - Trains classifier incrementally
+          - Predicts using the current fitted LightGBM; no per-sample retraining
           - Checks for drift using augmented features
+        On drift:
+          - Resets the assisted classifier, restarts warm-up collection
 
         :param detector: the hybrid drift detector
         :param stream: the data stream
         :param n_training_samples: the number of training samples
         :return: tuple of (drifts, labels, predictions)
         """
-        self.classifiers = Classifiers()
+        self.classifiers = ClassifiersV2()
         drifts = []
         labels = []
         predictions = []
@@ -157,7 +158,6 @@ class ModelOptimizer:
                 is_warming_up = True
                 warmup_buffer = []
 
-            self.classifiers.fit(x, y, nonadaptive=i < n_training_samples)
             train_steps += 1
 
         return drifts, labels, predictions

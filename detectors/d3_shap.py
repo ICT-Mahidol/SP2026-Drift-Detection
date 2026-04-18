@@ -6,7 +6,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 
 from .base import HybridDriftDetector
-from optimization.classifiers import Classifiers
+from optimization.classifiers_v2 import ClassifiersV2
 
 
 class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
@@ -43,13 +43,14 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         self.shap_classifier = shap_classifier
         self.kfold = StratifiedKFold(n_splits=2, shuffle=True, random_state=self.seed)
 
-    def build_reference(self, buffer: list, classifiers: Classifiers) -> None:
+    def build_reference(self, buffer: list, classifiers: ClassifiersV2) -> None:
         """
         Initialise the reference window from the warm-up buffer provided by the ModelOptimizer.
+        Uses the pre-fitted LightGBM from ``classifiers`` for SHAP; no model is trained here.
         Expects ``buffer`` to be a list of (features_dict, label) pairs.
 
         :param buffer: the warm-up buffer collected by the runner
-        :param classifiers: the Classifiers instance (unused here, kept for interface compatibility)
+        :param classifiers: the ClassifiersV2 instance whose assisted model is used as the SHAP model
         """
         xs = [
             np.fromiter(x.values(), dtype=float)
@@ -59,11 +60,11 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         if buffer:
             self.feature_names = list(buffer[0][0].keys())
             self._reference_labels = [y for _, y in buffer[-self.n_reference_samples :]]
-        self._shap_model = self._train_shap_model(np.array(xs), self._reference_labels)
+        self._shap_model = classifiers.get_model()
         import shap
         self._explainer = shap.TreeExplainer(self._shap_model, np.array(xs))
 
-    def update(self, features: dict, classifiers: Classifiers) -> bool:
+    def update(self, features: dict, classifiers: ClassifiersV2) -> bool:
         """
         Update the detector with the most recent observation and detect if a drift occurred.
 
@@ -84,7 +85,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
                 self.data = self.data[step:]
                 return False
 
-    def _detect_drift(self, classifiers: Classifiers) -> bool:
+    def _detect_drift(self, classifiers: ClassifiersV2) -> bool:
         """
         Detect if a drift occurred.
         Computes raw SHAP values for the recent window, augments the data with them,
@@ -136,7 +137,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         model.fit(X, y)
         return model
 
-    def _get_raw_shap(self, classifiers: Classifiers):
+    def _get_raw_shap(self, classifiers: ClassifiersV2):
         """
         Compute raw SHAP values using the cached shap.TreeExplainer (built once per
         reference window in ``build_reference``).
@@ -157,7 +158,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         # binary 2D fallback — wrap so downstream code stays uniform
         return [raw, -raw]
 
-    def _compute_shap_values(self, classifiers: Classifiers) -> np.ndarray:
+    def _compute_shap_values(self, classifiers: ClassifiersV2) -> np.ndarray:
         """
         Returns reduced SHAP values for the entire data window (reference + recent).
 
