@@ -32,9 +32,8 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         super().__init__(seed)
         self.data = []
         self.feature_names = None
-        self._reference_labels = None
-        self._shap_model = None
         self._explainer = None
+        self._raw_shap_cache = None
         self.n_reference_samples = n_reference_samples
         self.recent_samples_proportion = recent_samples_proportion
         self.n_samples = int(n_reference_samples * (1 + recent_samples_proportion))
@@ -59,10 +58,25 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         self.data = xs
         if buffer:
             self.feature_names = list(buffer[0][0].keys())
-            self._reference_labels = [y for _, y in buffer[-self.n_reference_samples :]]
-        self._shap_model = classifiers.get_model()
         import shap
-        self._explainer = shap.TreeExplainer(self._shap_model, np.array(xs))
+        self._explainer = shap.TreeExplainer(classifiers.get_model(), np.array(xs))
+        self._raw_shap_cache = None
+
+    def _get_slide_step(self) -> int:
+        return int(np.ceil(self.n_reference_samples * self.recent_samples_proportion))
+
+    def _append_shap_placeholder(self, feature_row: np.ndarray) -> None:
+        if self._raw_shap_cache is None:
+            return
+        placeholder = np.full((1, feature_row.shape[0]), np.nan)
+        self._raw_shap_cache = [
+            np.vstack([class_cache, placeholder]) for class_cache in self._raw_shap_cache
+        ]
+
+    def _slide_shap_cache(self, cut: int) -> None:
+        if self._raw_shap_cache is None:
+            return
+        self._raw_shap_cache = [class_cache[cut:] for class_cache in self._raw_shap_cache]
 
     def update(self, features: dict, classifiers: ClassifiersV2) -> bool:
         """
@@ -75,28 +89,30 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         features = np.fromiter(features.values(), dtype=float)
         if len(self.data) != self.n_samples:
             self.data.append(features)
+            self._append_shap_placeholder(features)
             return False
         else:
-            if self._detect_drift(classifiers):
+            if self._detect_drift():
                 self.data = self.data[self.n_reference_samples:]
+                self._slide_shap_cache(self.n_reference_samples)
                 return True
             else:
-                step = int(np.ceil(self.n_reference_samples * self.recent_samples_proportion))
+                step = self._get_slide_step()
                 self.data = self.data[step:]
+                self._slide_shap_cache(step)
                 return False
 
-    def _detect_drift(self, classifiers: ClassifiersV2) -> bool:
+    def _detect_drift(self) -> bool:
         """
         Detect if a drift occurred.
         Computes raw SHAP values for the recent window, augments the data with them,
         then uses a discriminative classifier to decide if a drift occurred.
 
-        :param classifiers: the Classifiers instance
         :return: True if a drift occurred, else False
         """
         disc_labels = self._get_labels()
         discriminator = LogisticRegression(solver="liblinear", random_state=self.seed)
-        raw_shap = self._compute_shap_values(classifiers)
+        raw_shap = self._compute_shap_values()
         augmented_data = self._augment_data_with_shap(raw_shap)
         predictions = self._predict(discriminator, augmented_data, disc_labels)
         auc_score = roc_auc_score(disc_labels, predictions)
@@ -112,32 +128,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         disc_labels[self.n_reference_samples:] = 1
         return disc_labels
 
-    def _train_shap_model(self, X: np.ndarray, y: list):
-        """
-        Train a surrogate sklearn-compatible model on the reference window for use with
-        TreeExplainer.
-
-        :param X: reference feature array, shape (n_reference_samples, n_features)
-        :param y: reference class labels
-        :return: trained LGBMClassifier or XGBClassifier
-        """
-        if self.shap_classifier == "xgboost":
-            from xgboost import XGBClassifier
-            model = XGBClassifier(
-                n_estimators=5,
-                random_state=self.seed,
-                eval_metric="mlogloss",
-                verbosity=0,
-            )
-            model.fit(X, y)
-            return model
-        # default: lightgbm
-        from lightgbm import LGBMClassifier
-        model = LGBMClassifier(n_estimators=5, random_state=self.seed, verbosity=-1)
-        model.fit(X, y)
-        return model
-
-    def _get_raw_shap(self, classifiers: ClassifiersV2):
+    def _get_raw_shap(self):
         """
         Compute raw SHAP values using the cached shap.TreeExplainer (built once per
         reference window in ``build_reference``).
@@ -145,11 +136,33 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         Always returns a list of arrays ``[(n_samples, n_features)] * n_classes`` so that
         downstream reduction methods are consistent across backends.
 
-        :param classifiers: the Classifiers instance (unused; SHAP uses the surrogate model)
         :return: list of arrays, one per class, each of shape (n_samples, n_features)
         """
         all_data = np.array(self.data)
-        raw = self._explainer.shap_values(all_data, check_additivity=False)
+        if self._raw_shap_cache is None:
+            self._raw_shap_cache = self._compute_raw_shap_block(all_data)
+            return self._raw_shap_cache
+
+        if self._raw_shap_cache[0].shape[0] != all_data.shape[0]:
+            self._raw_shap_cache = self._compute_raw_shap_block(all_data)
+            return self._raw_shap_cache
+
+        missing_mask = np.isnan(self._raw_shap_cache[0]).any(axis=1)
+        if np.any(missing_mask):
+            missing_data = all_data[missing_mask]
+            missing_raw = self._compute_raw_shap_block(missing_data)
+
+            if len(missing_raw) != len(self._raw_shap_cache):
+                self._raw_shap_cache = self._compute_raw_shap_block(all_data)
+                return self._raw_shap_cache
+
+            for class_index, class_cache in enumerate(self._raw_shap_cache):
+                class_cache[missing_mask] = missing_raw[class_index]
+
+        return self._raw_shap_cache
+
+    def _compute_raw_shap_block(self, data_block: np.ndarray):
+        raw = self._explainer.shap_values(data_block, check_additivity=False)
         # Normalise to list-of-arrays regardless of SHAP version
         if isinstance(raw, list):
             return raw
@@ -158,7 +171,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         # binary 2D fallback — wrap so downstream code stays uniform
         return [raw, -raw]
 
-    def _compute_shap_values(self, classifiers: ClassifiersV2) -> np.ndarray:
+    def _compute_shap_values(self) -> np.ndarray:
         """
         Returns reduced SHAP values for the entire data window (reference + recent).
 
@@ -166,10 +179,9 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         - ``"first"``: (n_samples, n_features)  — first class only
         - ``"all\"``:   (n_samples, n_features * n_classes)  — all classes concatenated
 
-        :param classifiers: the Classifiers instance
         :return: 2D array of shape (n_samples, n_features[*n_classes])
         """
-        shap_values = self._get_raw_shap(classifiers)  # list[(n_samples, n_features)] * n_classes
+        shap_values = self._get_raw_shap()  # list[(n_samples, n_features)] * n_classes
 
         if self.shap_mode == "all":
             return np.hstack(shap_values)

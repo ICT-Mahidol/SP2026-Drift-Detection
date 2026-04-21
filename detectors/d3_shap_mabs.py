@@ -1,7 +1,6 @@
 import numpy as np
 
 from .d3_shap import DiscriminativeDriftDetector2019SHAP
-from optimization.classifiers_v2 import ClassifiersV2
 
 
 class DiscriminativeDriftDetector2019SHAPMeanAbs(DiscriminativeDriftDetector2019SHAP):
@@ -20,13 +19,12 @@ class DiscriminativeDriftDetector2019SHAPMeanAbs(DiscriminativeDriftDetector2019
     is unused in this subclass.
     """
 
-    def _compute_shap_values(self, classifiers: ClassifiersV2) -> np.ndarray:
+    def _compute_shap_values(self) -> np.ndarray:
         """
         Returns mean-absolute SHAP values across all classes for the entire data
         window (reference + recent).
 
-        :param classifiers: the Classifiers instance
         :return: array of shape (n_samples, n_features)
         """
-        shap_values = self._get_raw_shap(classifiers)  # list[(n_samples, n_features)] * n_classes
+        shap_values = self._get_raw_shap()  # list[(n_samples, n_features)] * n_classes
         return np.mean(np.abs(np.stack(shap_values, axis=-1)), axis=-1)
