@@ -1,5 +1,5 @@
 from datasets import (
-    IncrementalDrift,
+    InsectsAbruptBalanced,
 )
 from detectors import *
 from optimization.model_optimizer import ModelOptimizer
@@ -8,7 +8,7 @@ from optimization.parameter import Parameter
 
 class Configuration:
     streams = [
-        IncrementalDrift(),
+        InsectsAbruptBalanced(),
     ]
     n_training_samples = 1000
     models = [
@@ -20,6 +20,6 @@ class Configuration:
                 Parameter("threshold", values=[0.7, 0.8]),
             ],
             seeds=None,
-            n_runs=5,
+            n_runs=1,
         ),
     ]
