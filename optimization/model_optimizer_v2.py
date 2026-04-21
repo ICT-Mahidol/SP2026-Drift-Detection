@@ -1,8 +1,10 @@
 from typing import List, Optional
 
+from tqdm import tqdm
+
 from detectors.base import HybridDriftDetector, UnsupervisedDriftDetector
 from metrics.metrics import get_metrics
-from .classifiers import Classifiers
+from .classifiers_v2 import ClassifiersV2
 from .config_generator import ConfigGenerator
 from .logger import ExperimentLogger
 from .parameter import Parameter
@@ -42,6 +44,7 @@ class ModelOptimizer:
         """
         Optimize the model on the given data stream and log the results using the ExperimentLogger.
         Supports both UnsupervisedDriftDetector (D3) and HybridDriftDetector (D3-SHAP).
+        All detectors now use batch-based classifier training.
 
         :param stream: the data stream
         :param experiment_name: the name of the experiment
@@ -58,104 +61,83 @@ class ModelOptimizer:
                 if verbose:
                     print(f"{logger.model}: {config}")
 
-                if isinstance(detector, HybridDriftDetector):
-                    drifts, labels, predictions = self._run_hybrid(
-                        detector, stream, n_training_samples
-                    )
-                else:
-                    drifts, labels, predictions = self._run_unsupervised(
-                        detector, stream, n_training_samples
-                    )
+                drifts, labels, predictions = self._run_unsupervised_batch(
+                    detector, stream, n_training_samples
+                )
 
                 metrics = get_metrics(stream, drifts, labels, predictions)
                 logger.log(config, metrics, drifts)
 
-    def _run_unsupervised(self, detector, stream, n_training_samples):
+    def _run_unsupervised_batch(self, detector, stream, n_training_samples):
         """
-        Run the original unsupervised drift detection loop (D3-compatible).
+        Run batch-based drift detection for both UnsupervisedDriftDetector and HybridDriftDetector.
+        Uses window-based data collection with warm-up phases and batch classifier training.
 
-        :param detector: the unsupervised drift detector
-        :param stream: the data stream
-        :param n_training_samples: the number of training samples
-        :return: tuple of (drifts, labels, predictions)
-        """
-        self.classifiers = Classifiers()
-        drifts = []
-        labels = []
-        predictions = []
-        train_steps = 0
-
-        for i, (x, y) in enumerate(stream):
-            if i != 0:
-                predictions.append(self.classifiers.predict(x))
-                labels.append(y)
-            if detector.update(x):
-                drifts.append(i)
-                self.classifiers.reset()
-                train_steps = 0
-            self.classifiers.fit(x, y, nonadaptive=i < n_training_samples)
-            train_steps += 1
-
-        return drifts, labels, predictions
-
-    def _run_hybrid(self, detector, stream, n_training_samples):
-        """
-        Run the hybrid drift detection loop (D3-SHAP compatible).
-        Uses window-based data collection with warm-up phases.
-
-        During warm-up:
+        Workflow:
+        1. Warmup phase:
           - Collects (x, y) into the warmup buffer
-          - No predictions are made
-          - No classifier training occurs
-          - No drift detection occurs
-        When buffer is full:
-          - Batch trains the classifier from buffer
-          - Builds SHAP-augmented reference window
-        During detection:
-          - Predicts and collects labels normally
-          - Trains classifier incrementally
-          - Checks for drift using augmented features
+          - No predictions or drift detection
+        2. When buffer reaches n_reference_samples:
+          - Batch-trains ClassifiersV2 from the entire buffer
+          - For HybridDriftDetector: builds SHAP-augmented reference window
+          - Exits warmup mode
+        3. Detection phase:
+          - Makes predictions using the fitted classifier (no retraining)
+          - For HybridDriftDetector: checks drift using update(x, classifier)
+          - For UnsupervisedDriftDetector: checks drift using update(x)
+        4. On drift:
+          - Resets classifier and restarts warmup
 
-        :param detector: the hybrid drift detector
+        :param detector: unsupervised or hybrid drift detector
         :param stream: the data stream
         :param n_training_samples: the number of training samples
         :return: tuple of (drifts, labels, predictions)
         """
-        self.classifiers = Classifiers()
+        self.classifiers = ClassifiersV2()
         drifts = []
         labels = []
         predictions = []
-        train_steps = 0
         is_warming_up = True
         warmup_buffer = []
+        
+        # Get the reference window size from detector, default to 200 if not available
+        n_reference_samples = getattr(detector, 'n_reference_samples', 200)
+        is_hybrid = isinstance(detector, HybridDriftDetector)
 
-        for i, (x, y) in enumerate(stream):
+        for i, (x, y) in enumerate(tqdm(stream, total=getattr(stream, "n_samples", None))):
             if is_warming_up:
                 warmup_buffer.append((x, y))
 
-                if len(warmup_buffer) >= detector.n_reference_samples:
+                if len(warmup_buffer) >= n_reference_samples:
+                    # Batch fit classifier on the warmup buffer
                     self.classifiers.batch_fit(
                         warmup_buffer,
                         nonadaptive=i < n_training_samples,
                     )
-                    detector.build_reference(warmup_buffer, self.classifiers)
-                    train_steps = len(warmup_buffer)
+                    
+                    # For hybrid detectors, build reference window with SHAP
+                    if is_hybrid:
+                        detector.build_reference(warmup_buffer, self.classifiers)
+                    
                     warmup_buffer = []
                     is_warming_up = False
                 continue
 
+            # Make predictions using the fitted classifier
             if i != 0:
                 predictions.append(self.classifiers.predict(x))
                 labels.append(y)
 
-            if detector.update(x, y, self.classifiers):
+            # Check for drift (different update signatures for hybrid vs unsupervised)
+            if is_hybrid:
+                drift_detected = detector.update(x, self.classifiers)
+            else:
+                drift_detected = detector.update(x)
+            
+            if drift_detected:
                 drifts.append(i)
                 self.classifiers.reset()
-                train_steps = 0
                 is_warming_up = True
                 warmup_buffer = []
-
-            self.classifiers.fit(x, y, nonadaptive=i < n_training_samples)
-            train_steps += 1
 
         return drifts, labels, predictions
