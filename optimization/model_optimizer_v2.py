@@ -128,13 +128,8 @@ class ModelOptimizer:
                 predictions.append(self.classifiers.predict(x))
                 labels.append(y)
 
-            # Check for drift (different update signatures for hybrid vs unsupervised)
-            if is_hybrid:
-                drift_detected = detector.update(x, self.classifiers)
-            else:
-                drift_detected = detector.update(x)
-            
-            if drift_detected:
+            # Check for drift.
+            if detector.update(x):
                 drifts.append(i)
                 self.classifiers.reset()
                 is_warming_up = True

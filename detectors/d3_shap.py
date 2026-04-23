@@ -8,6 +8,20 @@ from sklearn.model_selection import StratifiedKFold
 from .base import HybridDriftDetector
 from optimization.classifiers_v2 import ClassifiersV2
 
+import time
+from functools import wraps
+
+# def timer(func):
+#     @wraps(func)
+#     def wrapper(*args, **kwargs):
+#         start_time = time.perf_counter()  # High-resolution timer
+#         result = func(*args, **kwargs)
+#         end_time = time.perf_counter()
+#         print(f"Executed {func.__name__} in {end_time - start_time:.4f} seconds")
+#         return result
+#     return wrapper
+
+
 
 class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
     """
@@ -41,7 +55,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         self.shap_mode = shap_mode
         self.shap_classifier = shap_classifier
         self.kfold = StratifiedKFold(n_splits=2, shuffle=True, random_state=self.seed)
-
+    #@timer
     def build_reference(self, buffer: list, classifiers: ClassifiersV2) -> None:
         """
         Initialise the reference window from the warm-up buffer provided by the ModelOptimizer.
@@ -59,7 +73,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         if buffer:
             self.feature_names = list(buffer[0][0].keys())
         import shap
-        self._explainer = shap.TreeExplainer(classifiers.get_model(), np.array(xs))
+        self._explainer = shap.TreeExplainer(classifiers.get_model())
         self._raw_shap_cache = None
 
     def _get_slide_step(self) -> int:
@@ -78,12 +92,11 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
             return
         self._raw_shap_cache = [class_cache[cut:] for class_cache in self._raw_shap_cache]
 
-    def update(self, features: dict, classifiers: ClassifiersV2) -> bool:
+    def update(self, features: dict) -> bool:
         """
         Update the detector with the most recent observation and detect if a drift occurred.
 
         :param features: the features
-        :param classifiers: the Classifiers instance for use in future steps
         :returns: True if a drift occurred else False
         """
         features = np.fromiter(features.values(), dtype=float)
@@ -127,7 +140,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         disc_labels = np.zeros(self.n_samples)
         disc_labels[self.n_reference_samples:] = 1
         return disc_labels
-
+    
     def _get_raw_shap(self):
         """
         Compute raw SHAP values using the cached shap.TreeExplainer (built once per
@@ -160,7 +173,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
                 class_cache[missing_mask] = missing_raw[class_index]
 
         return self._raw_shap_cache
-
+    #@timer
     def _compute_raw_shap_block(self, data_block: np.ndarray):
         raw = self._explainer.shap_values(data_block, check_additivity=False)
         # Normalise to list-of-arrays regardless of SHAP version
