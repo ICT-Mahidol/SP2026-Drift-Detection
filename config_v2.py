@@ -1,5 +1,14 @@
 from datasets import (
     InsectsAbruptBalanced,
+    InsectsGradualBalancedRaw,
+    InsectsIncrementalBalancedRaw,
+    InsectsIncrementalAbruptBalancedRaw,
+    InsectsIncrementalReoccurringBalancedRaw,
+    OzoneLevelDetection,
+    ElectricityNormalized,
+    PokerHandRaw,
+    SineClusters,
+    WaveformDrift2,
 )
 from detectors import *
 from optimization.model_optimizer import ModelOptimizer
@@ -8,7 +17,11 @@ from optimization.parameter import Parameter
 
 class Configuration:
     streams = [
-        InsectsAbruptBalanced(),
+        #ElectricityNormalized(),
+        #PokerHandRaw(),
+        #SineClusters(drift_frequency=5000, stream_length=50000),
+        #WaveformDrift2(drift_frequency=5000, stream_length=50000),
+        OzoneLevelDetection(),
     ]
     n_training_samples = 1000
     models = [
