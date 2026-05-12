@@ -3,6 +3,9 @@ from .csddm import ClusteredStatisticalTestDriftDetectionMethod
 from .d3 import DiscriminativeDriftDetector2019
 from .d3_shap import DiscriminativeDriftDetector2019SHAP
 from .d3_shap_mabs import DiscriminativeDriftDetector2019SHAPMeanAbs
+from .d3_tang import DiscriminativeDriftDetector2019_Permutation
+from .d3_shap_mabs_tang import DiscriminativeDriftDetector2019SHAPMeanAbs_permutation
+from .d3_shap_first_tang import DiscriminativeDriftDetector2019SHAPFirst_permutation
 from .edfs import EDFS
 from .ibdd import ImageBasedDriftDetector
 from .nndvi import NNDVI

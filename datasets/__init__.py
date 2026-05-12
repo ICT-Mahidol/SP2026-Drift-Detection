@@ -1,3 +1,7 @@
+#Add Tang Synthetic
+from .abrupt_drift import AbruptDrift
+from .gradual_drift import GradualDrift
+#
 from .airlines import Airlines
 from .chess import Chess
 from .electricity import Electricity

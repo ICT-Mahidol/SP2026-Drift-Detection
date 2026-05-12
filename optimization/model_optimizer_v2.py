@@ -1,3 +1,4 @@
+from collections import deque
 from typing import List, Optional
 
 from tqdm import tqdm
@@ -74,19 +75,22 @@ class ModelOptimizer:
         Uses window-based data collection with warm-up phases and batch classifier training.
 
         Workflow:
-        1. Warmup phase:
-          - Collects (x, y) into the warmup buffer
+        1. Warmup phase (n_reference_samples samples):
+          - Calls detector.update(x) on every sample (updates internal window, result ignored)
+          - Collects (x, y) into warmup_buffer (pre-filled with recent_buffer on restart)
           - No predictions or drift detection
-        2. When buffer reaches n_reference_samples:
-          - Batch-trains ClassifiersV2 from the entire buffer
+        2. When warmup_buffer reaches n_reference_samples:
+          - Batch-trains ClassifiersV2 from the entire warmup_buffer
           - For HybridDriftDetector: builds SHAP-augmented reference window
           - Exits warmup mode
         3. Detection phase:
           - Makes predictions using the fitted classifier (no retraining)
-          - For HybridDriftDetector: checks drift using update(x, classifier)
-          - For UnsupervisedDriftDetector: checks drift using update(x)
+          - Tracks a rolling recent_buffer of the last n_new_samples observations
+          - Checks drift using detector.update(x)
         4. On drift:
-          - Resets classifier and restarts warmup
+          - Resets classifier
+          - Seeds next warmup_buffer with recent_buffer (n_new_samples samples already seen)
+          - Waits for n_new_samples more samples to complete the new warmup_buffer
 
         :param detector: unsupervised or hybrid drift detector
         :param stream: the data stream
@@ -99,14 +103,22 @@ class ModelOptimizer:
         predictions = []
         is_warming_up = True
         warmup_buffer = []
-        
-        # Get the reference window size from detector, default to 200 if not available
-        n_reference_samples = getattr(detector, 'n_reference_samples', 200)
+
+        # Get window sizes from the detector
+        n_reference_samples = getattr(detector, 'n_reference_samples', 500)
+        recent_proportion = getattr(detector, 'recent_samples_proportion', 0.5)
+        n_new_samples = int(n_reference_samples * recent_proportion)
         is_hybrid = isinstance(detector, HybridDriftDetector)
 
+        # Rolling buffer that keeps the last n_new_samples seen during detection
+        recent_buffer: deque = deque(maxlen=n_new_samples)
+
         for i, (x, y) in enumerate(tqdm(stream, total=getattr(stream, "n_samples", None))):
+
             if is_warming_up:
-                warmup_buffer.append((x, y))
+                detector.update(x)  # Update detector with x during warmup (no drift check)
+                warmup_buffer.append((x, y))#update แต่ไม่ต้องเช็ค drift เพราะยังไม่ได้ฝึก classifier
+                
 
                 if len(warmup_buffer) >= n_reference_samples:
                     # Batch fit classifier on the warmup buffer
@@ -128,11 +140,18 @@ class ModelOptimizer:
                 predictions.append(self.classifiers.predict(x))
                 labels.append(y)
 
+            # Track rolling window of recent samples for warmup seeding on drift
+            recent_buffer.append((x, y))
+
             # Check for drift.
             if detector.update(x):
                 drifts.append(i)
                 self.classifiers.reset()
+                if is_hybrid:
+                    detector._explainer = None  # invalidate old explainer until build_reference
                 is_warming_up = True
-                warmup_buffer = []
+                # Seed the next warmup with the samples from the drifted window
+                warmup_buffer = list(recent_buffer)
+                recent_buffer.clear()
 
         return drifts, labels, predictions

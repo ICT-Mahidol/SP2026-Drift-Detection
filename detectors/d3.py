@@ -38,11 +38,14 @@ class DiscriminativeDriftDetector2019(UnsupervisedDriftDetector):
         :param threshold: the threshold above which two concepts can be reliably discerned and a drift is signalled
         """
         super().__init__(seed)
-        self.data = []
         self.n_reference_samples = n_reference_samples
         self.recent_samples_proportion = recent_samples_proportion
-        self.n_samples = int(n_reference_samples * (1 + recent_samples_proportion))
+        self.n_samples = n_reference_samples
+        self.n_ref = int(n_reference_samples * (1 - recent_samples_proportion))
+        self.n_new = int(n_reference_samples * recent_samples_proportion)
         self.threshold = threshold
+        self.ref = []
+        self.new = []
         self.kfold = StratifiedKFold(n_splits=2, shuffle=True, random_state=self.seed)
 
     def update(self, features: dict) -> bool:
@@ -53,16 +56,24 @@ class DiscriminativeDriftDetector2019(UnsupervisedDriftDetector):
         :returns: True if a drift occurred else False
         """
         features = np.fromiter(features.values(), dtype=float)
-        if len(self.data) != self.n_samples:
-            self.data.append(features)
+        if len(self.ref) < self.n_ref:
+            self.ref.append(features)
+            return False  # รับ ref จนครบก่อน ยังไม่ detect
+        if self.n_new == 0:
+            return False  # ไม่มี new window ไม่สามารถ detect ได้
+        if len(self.new) < self.n_new:
+            self.new.append(features)
+            if len(self.new) < self.n_new:
+                return False  # new ยังไม่ครบ รอต่อ
+
+        # ทั้ง ref และ new เต็มแล้ว
+        if self._detect_drift():
+            self.ref = list(self.new)  # โยน new ไปเป็น ref
+            self.new = []              # clear new
+            return True
         else:
-            if self._detect_drift():
-                self.data = self.data[self.n_reference_samples :]
-                return True
-            else:
-                step = int(np.ceil(self.n_reference_samples * self.recent_samples_proportion))
-                self.data = self.data[step:]
-        return False
+            self.new = []              # clear new เท่านั้น
+            return False
 
     def _detect_drift(self) -> bool:
         """
@@ -72,7 +83,8 @@ class DiscriminativeDriftDetector2019(UnsupervisedDriftDetector):
         """
         labels = self._get_labels()
         discriminator = LogisticRegression(solver="liblinear", random_state=self.seed)
-        predictions = self._predict(discriminator, np.array(self.data), labels)
+        data = np.array(self.ref + self.new)  # เอา ref + new มาต่อกัน
+        predictions = self._predict(discriminator, data, labels)
         auc_score = roc_auc_score(labels, predictions)
         return auc_score >= self.threshold
 
@@ -82,8 +94,8 @@ class DiscriminativeDriftDetector2019(UnsupervisedDriftDetector):
 
         :return: the labels
         """
-        labels = np.zeros(self.n_samples)
-        labels[self.n_reference_samples :] = 1
+        labels = np.zeros(self.n_ref + self.n_new)
+        labels[self.n_ref:] = 1  # ref = 0, new = 1
         return labels
 
     def _predict(self, discriminator, data: np.array, labels: np.array) -> np.array:
@@ -95,11 +107,9 @@ class DiscriminativeDriftDetector2019(UnsupervisedDriftDetector):
         :param labels: the labels of the data
         :return: the predictions
         """
-        predictions = np.zeros(self.n_samples)
+        predictions = np.zeros(self.n_ref + self.n_new)
         # kfold testing is not described in the paper, but used in the source code provided by the authors
         for train_index, test_index in self.kfold.split(data, labels):
             discriminator.fit(data[train_index], labels[train_index])
-            predictions[test_index] = discriminator.predict_proba(data[test_index])[
-                :, 1
-            ]
+            predictions[test_index] = discriminator.predict_proba(data[test_index])[:, 1]
         return predictions

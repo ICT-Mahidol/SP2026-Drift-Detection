@@ -8,19 +8,6 @@ from sklearn.model_selection import StratifiedKFold
 from .base import HybridDriftDetector
 from optimization.classifiers_v2 import ClassifiersV2
 
-import time
-from functools import wraps
-
-# def timer(func):
-#     @wraps(func)
-#     def wrapper(*args, **kwargs):
-#         start_time = time.perf_counter()  # High-resolution timer
-#         result = func(*args, **kwargs)
-#         end_time = time.perf_counter()
-#         print(f"Executed {func.__name__} in {end_time - start_time:.4f} seconds")
-#         return result
-#     return wrapper
-
 
 
 class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
@@ -44,18 +31,21 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         seed: Optional[int] = None,
     ):
         super().__init__(seed)
-        self.data = []
         self.feature_names = None
         self._explainer = None
         self._raw_shap_cache = None
         self.n_reference_samples = n_reference_samples
         self.recent_samples_proportion = recent_samples_proportion
-        self.n_samples = int(n_reference_samples * (1 + recent_samples_proportion))
+        self.n_samples = n_reference_samples
+        self.n_ref = int(n_reference_samples * (1 - recent_samples_proportion))
+        self.n_new = int(n_reference_samples * recent_samples_proportion)
         self.threshold = threshold
         self.shap_mode = shap_mode
         self.shap_classifier = shap_classifier
+        self.ref = []
+        self.new = []
         self.kfold = StratifiedKFold(n_splits=2, shuffle=True, random_state=self.seed)
-    #@timer
+
     def build_reference(self, buffer: list, classifiers: ClassifiersV2) -> None:
         """
         Initialise the reference window from the warm-up buffer provided by the ModelOptimizer.
@@ -67,30 +57,15 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         """
         xs = [
             np.fromiter(x.values(), dtype=float)
-            for x, _ in buffer[-self.n_reference_samples :]
+            for x, _ in buffer[-self.n_ref :]
         ]
-        self.data = xs
+        self.ref = xs
+        self.new = []
         if buffer:
             self.feature_names = list(buffer[0][0].keys())
         import shap
         self._explainer = shap.TreeExplainer(classifiers.get_model())
         self._raw_shap_cache = None
-
-    def _get_slide_step(self) -> int:
-        return int(np.ceil(self.n_reference_samples * self.recent_samples_proportion))
-
-    def _append_shap_placeholder(self, feature_row: np.ndarray) -> None:
-        if self._raw_shap_cache is None:
-            return
-        placeholder = np.full((1, feature_row.shape[0]), np.nan)
-        self._raw_shap_cache = [
-            np.vstack([class_cache, placeholder]) for class_cache in self._raw_shap_cache
-        ]
-
-    def _slide_shap_cache(self, cut: int) -> None:
-        if self._raw_shap_cache is None:
-            return
-        self._raw_shap_cache = [class_cache[cut:] for class_cache in self._raw_shap_cache]
 
     def update(self, features: dict) -> bool:
         """
@@ -100,20 +75,28 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         :returns: True if a drift occurred else False
         """
         features = np.fromiter(features.values(), dtype=float)
-        if len(self.data) != self.n_samples:
-            self.data.append(features)
-            self._append_shap_placeholder(features)
-            return False
+        if len(self.ref) < self.n_ref:
+            self.ref.append(features)
+            return False  # รับ ref จนครบก่อน ยังไม่ detect
+        if self.n_new == 0:
+            return False  # ไม่มี new window ไม่สามารถ detect ได้
+        if len(self.new) < self.n_new:
+            self.new.append(features)
+            if len(self.new) < self.n_new:
+                return False  # new ยังไม่ครบ รอต่อ
+
+        # ทั้ง ref และ new เต็มแล้ว
+        if self._detect_drift():
+            self.ref = list(self.new)  # โยน new ไปเป็น ref
+            self.new = []
+            if self._raw_shap_cache is not None:
+                self._raw_shap_cache = [cls[self.n_ref:] for cls in self._raw_shap_cache]
+            return True
         else:
-            if self._detect_drift():
-                self.data = self.data[self.n_reference_samples:]
-                self._slide_shap_cache(self.n_reference_samples)
-                return True
-            else:
-                step = self._get_slide_step()
-                self.data = self.data[step:]
-                self._slide_shap_cache(step)
-                return False
+            self.new = []
+            if self._raw_shap_cache is not None:
+                self._raw_shap_cache = [cls[:self.n_ref] for cls in self._raw_shap_cache]
+            return False
 
     def _detect_drift(self) -> bool:
         """
@@ -123,6 +106,8 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
 
         :return: True if a drift occurred, else False
         """
+        if self._explainer is None:
+            return False
         disc_labels = self._get_labels()
         discriminator = LogisticRegression(solver="liblinear", random_state=self.seed)
         raw_shap = self._compute_shap_values()
@@ -137,8 +122,8 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
 
         :return: the labels
         """
-        disc_labels = np.zeros(self.n_samples)
-        disc_labels[self.n_reference_samples:] = 1
+        disc_labels = np.zeros(self.n_ref + self.n_new)
+        disc_labels[self.n_ref:] = 1
         return disc_labels
     
     def _get_raw_shap(self):
@@ -148,32 +133,41 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
 
         Always returns a list of arrays ``[(n_samples, n_features)] * n_classes`` so that
         downstream reduction methods are consistent across backends.
+        Cache grows left-to-right in sync with self.ref + self.new.
 
         :return: list of arrays, one per class, each of shape (n_samples, n_features)
         """
-        all_data = np.array(self.data)
+        all_data = np.array(self.ref + self.new)
+
+        # No cache yet — compute everything from scratch
         if self._raw_shap_cache is None:
             self._raw_shap_cache = self._compute_raw_shap_block(all_data)
             return self._raw_shap_cache
 
-        if self._raw_shap_cache[0].shape[0] != all_data.shape[0]:
-            self._raw_shap_cache = self._compute_raw_shap_block(all_data)
+        cached_n = self._raw_shap_cache[0].shape[0]
+        total_n = all_data.shape[0]
+
+        if cached_n == total_n:
+            # Cache already up to date
             return self._raw_shap_cache
 
-        missing_mask = np.isnan(self._raw_shap_cache[0]).any(axis=1)
-        if np.any(missing_mask):
-            missing_data = all_data[missing_mask]
-            missing_raw = self._compute_raw_shap_block(missing_data)
-
-            if len(missing_raw) != len(self._raw_shap_cache):
+        if cached_n < total_n:
+            # Compute only the rows not yet in cache and append in order
+            new_raw = self._compute_raw_shap_block(all_data[cached_n:])
+            if len(new_raw) != len(self._raw_shap_cache):
+                # Class count mismatch — recompute from scratch
                 self._raw_shap_cache = self._compute_raw_shap_block(all_data)
-                return self._raw_shap_cache
+            else:
+                self._raw_shap_cache = [
+                    np.vstack([cls, new_raw[i]])
+                    for i, cls in enumerate(self._raw_shap_cache)
+                ]
+            return self._raw_shap_cache
 
-            for class_index, class_cache in enumerate(self._raw_shap_cache):
-                class_cache[missing_mask] = missing_raw[class_index]
-
+        # cached_n > total_n — recompute from scratch
+        self._raw_shap_cache = self._compute_raw_shap_block(all_data)
         return self._raw_shap_cache
-    #@timer
+
     def _compute_raw_shap_block(self, data_block: np.ndarray):
         raw = self._explainer.shap_values(data_block, check_additivity=False)
         # Normalise to list-of-arrays regardless of SHAP version
@@ -209,7 +203,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         :param raw_shap: raw SHAP values for all samples, shape (n_samples, n_features)
         :return: augmented data array of shape (n_samples, n_features * 2)
         """
-        return np.hstack([np.array(self.data), raw_shap])
+        return np.hstack([np.array(self.ref + self.new), raw_shap])
 
     def _predict(self, discriminator, data: np.array, disc_labels: np.array) -> np.array:
         """
@@ -222,7 +216,7 @@ class DiscriminativeDriftDetector2019SHAP(HybridDriftDetector):
         :param disc_labels: the discriminative labels of the data
         :return: the predictions
         """
-        predictions = np.zeros(self.n_samples)
+        predictions = np.zeros(self.n_ref + self.n_new)
         for train_index, test_index in self.kfold.split(data, disc_labels):
             discriminator.fit(data[train_index], disc_labels[train_index])
             predictions[test_index] = discriminator.predict_proba(data[test_index])[:, 1]
