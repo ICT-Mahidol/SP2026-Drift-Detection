@@ -58,3 +58,21 @@ class Classifiers:
         """
         self.assisted_hoeffding_tree = HoeffdingTreeClassifier()
         self.assisted_gaussian_nb = GaussianNB()
+
+    def batch_fit(self, buffer, nonadaptive=True):
+        """
+        Fit the classifiers on a batch of training data from a buffer.
+
+        :param buffer: list of (x, y) tuples
+        :param nonadaptive: True if base classifiers shall be trained as well, else False
+        """
+        for x, y in buffer:
+            self.fit(x, y, nonadaptive=nonadaptive)
+
+    def get_model(self):
+        """
+        Get the assisted Hoeffding Tree classifier for external use (e.g., SHAP computation).
+
+        :return: the assisted HoeffdingTreeClassifier
+        """
+        return self.assisted_hoeffding_tree

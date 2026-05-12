@@ -1,11 +1,12 @@
+#Add Tang Synthetic
 from .abrupt_drift import AbruptDrift
+from .gradual_drift import GradualDrift
+#
 from .airlines import Airlines
 from .chess import Chess
 from .electricity import Electricity
 from .forest_covertype import ForestCovertype
 from .gas_sensor import GasSensor
-from .gradual_drift import GradualDrift
-from .incremental_drift import IncrementalDrift
 from .insects import (
     InsectsAbruptBalanced,
     InsectsAbruptImbalanced,

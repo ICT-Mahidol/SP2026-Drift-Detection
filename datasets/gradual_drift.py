@@ -10,12 +10,13 @@ class GradualDrift(base.FileDataset):
         directory_path: str = "datasets/files",
     ):
         super().__init__(
-            n_samples=10000,
+            n_samples=30000,
             n_features=10,
             task=base.MULTI_CLF,
             filename="gradual_drift_concept_id.csv",
         )
         self.full_path = path.join(directory_path, self.filename)
+        self.drifts = [10000, 20000]
 
     def __iter__(self):
         for x, y in stream.iter_csv(
